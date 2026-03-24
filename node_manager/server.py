@@ -5,6 +5,8 @@ Accepts ManageNode action goals to start or stop ROS2 nodes as subprocesses.
 Each managed node is tracked by a user-supplied node_name label.
 """
 
+import os
+import signal
 import subprocess
 import shutil
 import rclpy
@@ -101,6 +103,7 @@ class NodeManagerServer(Node):
                 cmd,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                preexec_fn=os.setsid,
             )
         except FileNotFoundError as exc:
             goal_handle.abort()
@@ -135,18 +138,19 @@ class NodeManagerServer(Node):
             result.message = f'Node "{label}" had already exited (rc={proc.returncode})'
             return result
 
-        feedback.status = f'Sending SIGTERM to "{label}" (pid {proc.pid})'
+        pgid = os.getpgid(proc.pid)
+        feedback.status = f'Sending SIGTERM to "{label}" (pid {proc.pid}, pgid {pgid})'
         goal_handle.publish_feedback(feedback)
         self.get_logger().info(feedback.status)
 
-        proc.terminate()
+        os.killpg(pgid, signal.SIGTERM)
         try:
             proc.wait(timeout=5.0)
         except subprocess.TimeoutExpired:
             feedback.status = f'SIGTERM timed out — sending SIGKILL to "{label}"'
             goal_handle.publish_feedback(feedback)
             self.get_logger().warn(feedback.status)
-            proc.kill()
+            os.killpg(pgid, signal.SIGKILL)
             proc.wait()
 
         del self._processes[label]
@@ -164,7 +168,10 @@ class NodeManagerServer(Node):
         for label, proc in list(self._processes.items()):
             if proc.poll() is None:
                 self.get_logger().info(f'Shutting down — terminating "{label}"')
-                proc.terminate()
+                try:
+                    os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
                 proc.wait(timeout=3.0)
         super().destroy_node()
 
